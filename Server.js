@@ -13,7 +13,7 @@ const SECRET_KEY = 'tu_clave_secreta_jwt_para_el_consultorio';
 // Configuración de conexión a SQL Server 2022
 const dbConfig = {
     user: 'sa',               // REEMPLAZA CON TU USUARIO
-    password: '123456789', // REEMPLAZA CON TU CONTRASEÑA
+    password: 'Admin#1234', // REEMPLAZA CON TU CONTRASEÑA
     server: 'localhost',
     database: 'ConsultorioDB',
     options: {
