@@ -1,8 +1,8 @@
 const express = require('express');
 const jwt = require('jsonwebtoken');
 const cors = require('cors');
-const sql = require('mssql');
-const bcrypt = require('bcryptjs'); // <-- Importamos la librería de encriptación
+const { Pool } = require('pg'); // <-- Importamos PostgreSQL en lugar de mssql
+const bcrypt = require('bcryptjs'); 
 
 const app = express();
 app.use(express.json());
@@ -10,21 +10,19 @@ app.use(cors());
 
 const SECRET_KEY = 'tu_clave_secreta_jwt_para_el_consultorio';
 
-// Configuración de conexión a SQL Server 2022
-const dbConfig = {
-    user: 'sa',               // REEMPLAZA CON TU USUARIO
-    password: 'Admin#1234', // REEMPLAZA CON TU CONTRASEÑA
-    server: 'localhost',
-    database: 'ConsultorioDB',
-    options: {
-        encrypt: false, 
-        trustServerCertificate: true 
-    }
-};
+// Configuración de conexión a PostgreSQL
+const pool = new Pool({
+    user: 'postgres',         // Usuario por defecto de Postgres
+    host: 'localhost',
+    password: 'Admin#1234',   // Tu contraseña estandarizada
+    database: 'consultorio_db', // Nombre de tu base de datos (ajusta si le pusiste otro)
+    port: 5432,
+});
 
-sql.connect(dbConfig).then(() => {
-    console.log('Conectado exitosamente a SQL Server 2022');
-}).catch(err => console.error('Error crítico: No se pudo conectar a la BD', err));
+// Prueba de conexión
+pool.connect()
+    .then(() => console.log('Conectado exitosamente a PostgreSQL'))
+    .catch(err => console.error('Error crítico: No se pudo conectar a la BD', err));
 
 // Middleware Zero Trust
 const verificarToken = (req, res, next) => {
@@ -43,24 +41,20 @@ const verificarToken = (req, res, next) => {
 app.post('/api/auth/register', async (req, res) => {
     const { username, password } = req.body;
     try {
-        const request = new sql.Request();
-        
-        const resultCheck = await request
-            .input('username', sql.VarChar, username)
-            .query('SELECT * FROM Usuarios WHERE username = @username');
+        // Postgres usa $1, $2 para los parámetros de seguridad
+        const resultCheck = await pool.query('SELECT * FROM Usuarios WHERE username = $1', [username]);
 
-        if (resultCheck.recordset.length > 0) {
+        // Postgres devuelve los datos en un arreglo llamado "rows"
+        if (resultCheck.rows.length > 0) {
             return res.status(400).json({ mensaje: 'El usuario ya existe en la base de datos.' });
         }
 
         // --- INICIO DE ENCRIPTACIÓN ---
-        const salt = await bcrypt.genSalt(10); // Generamos entropía
-        const hashedPassword = await bcrypt.hash(password, salt); // Hasheamos la contraseña
+        const salt = await bcrypt.genSalt(10); 
+        const hashedPassword = await bcrypt.hash(password, salt); 
         // --- FIN DE ENCRIPTACIÓN ---
 
-        await request
-            .input('password', sql.VarChar, hashedPassword) // Insertamos el hash, no el texto plano
-            .query('INSERT INTO Usuarios (username, password) VALUES (@username, @password)');
+        await pool.query('INSERT INTO Usuarios (username, password) VALUES ($1, $2)', [username, hashedPassword]);
 
         res.json({ mensaje: 'Usuario registrado exitosamente. Ya puedes iniciar sesión.' });
     } catch (err) {
@@ -72,18 +66,12 @@ app.post('/api/auth/register', async (req, res) => {
 app.post('/api/auth/login', async (req, res) => {
     const { username, password } = req.body;
     try {
-        const request = new sql.Request();
+        const result = await pool.query('SELECT * FROM Usuarios WHERE username = $1', [username]);
         
-        // Primero buscamos al usuario solo por su nombre
-        const result = await request
-            .input('username', sql.VarChar, username)
-            .query('SELECT * FROM Usuarios WHERE username = @username');
-        
-        if (result.recordset.length > 0) {
-            const usuarioDb = result.recordset[0];
+        if (result.rows.length > 0) {
+            const usuarioDb = result.rows[0];
             
             // --- VERIFICACIÓN CRIPTOGRÁFICA ---
-            // Comparamos el texto plano recibido con el Hash de la BD
             const contraseñaValida = await bcrypt.compare(password, usuarioDb.password);
             
             if (contraseñaValida) {
@@ -100,9 +88,8 @@ app.post('/api/auth/login', async (req, res) => {
 // Endpoint Protegido
 app.get('/api/dashboard', verificarToken, async (req, res) => {
     try {
-        const request = new sql.Request();
-        const result = await request.query('SELECT * FROM Pacientes');
-        res.json({ mensaje: 'Conexión a BD segura establecida.', pacientes: result.recordset });
+        const result = await pool.query('SELECT * FROM Pacientes');
+        res.json({ mensaje: 'Conexión a BD segura establecida.', pacientes: result.rows });
     } catch (err) {
         res.status(500).json({ mensaje: 'Error al consultar BD', error: err.message });
     }
