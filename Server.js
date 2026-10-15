@@ -1,100 +1,122 @@
+require('dotenv').config();
 const express = require('express');
 const jwt = require('jsonwebtoken');
-const cors = require('cors');
-const { Pool } = require('pg'); // <-- Importamos PostgreSQL en lugar de mssql
-const bcrypt = require('bcryptjs'); 
+const { Pool } = require('pg');
+const bcrypt = require('bcryptjs');
+
+// Los secretos se leen del archivo .env (que NO se sube a GitHub)
+const {
+    HOST = '127.0.0.1',
+    PORT = 3000,
+    JWT_SECRET,
+    DB_HOST = 'localhost',
+    DB_PORT = 5432,
+    DB_USER = 'postgres',
+    DB_PASSWORD,
+    DB_NAME = 'consultorio_db',
+    REGISTRO_ABIERTO = 'false',
+} = process.env;
+
+if (!JWT_SECRET || JWT_SECRET.length < 32 || !DB_PASSWORD) {
+    console.error('Falta configurar el archivo .env (JWT_SECRET de 32+ caracteres y DB_PASSWORD).');
+    process.exit(1);
+}
 
 const app = express();
-app.use(express.json());
-app.use(cors());
-
-const SECRET_KEY = 'tu_clave_secreta_jwt_para_el_consultorio';
+app.disable('x-powered-by');
+app.use(express.json({ limit: '10kb' }));
 
 // Configuración de conexión a PostgreSQL
 const pool = new Pool({
-    user: 'postgres',         // Usuario por defecto de Postgres
-    host: 'localhost',
-    password: 'Admin#1234',   // Tu contraseña estandarizada
-    database: 'consultorio_db', // Nombre de tu base de datos (ajusta si le pusiste otro)
-    port: 5432,
+    user: DB_USER,
+    host: DB_HOST,
+    password: DB_PASSWORD,
+    database: DB_NAME,
+    port: Number(DB_PORT),
 });
 
 // Prueba de conexión
-pool.connect()
+pool.query('SELECT 1')
     .then(() => console.log('Conectado exitosamente a PostgreSQL'))
-    .catch(err => console.error('Error crítico: No se pudo conectar a la BD', err));
+    .catch(err => console.error('Error crítico: No se pudo conectar a la BD', err.message));
 
-// Middleware Zero Trust
+// Middleware Zero Trust: cada solicitud debe traer un JWT válido
 const verificarToken = (req, res, next) => {
-    const authHeader = req.headers['authorization'];
-    if (!authHeader) return res.status(403).json({ mensaje: 'Acceso denegado. Se requiere token.' });
-
-    const token = authHeader.split(' ')[1];
-    jwt.verify(token, SECRET_KEY, (err, decoded) => {
+    const authHeader = req.headers['authorization'] || '';
+    const [tipo, token] = authHeader.split(' ');
+    if (tipo !== 'Bearer' || !token) {
+        return res.status(401).json({ mensaje: 'Acceso denegado. Se requiere token.' });
+    }
+    jwt.verify(token, JWT_SECRET, { algorithms: ['HS256'] }, (err, decoded) => {
         if (err) return res.status(401).json({ mensaje: 'Error al obtener datos seguros. Token inválido.' });
         req.user = decoded;
         next();
     });
 };
 
-// Endpoint de Registro (Guarda la contraseña ENCRIPTADA)
-app.post('/api/auth/register', async (req, res) => {
-    const { username, password } = req.body;
-    try {
-        // Postgres usa $1, $2 para los parámetros de seguridad
-        const resultCheck = await pool.query('SELECT * FROM Usuarios WHERE username = $1', [username]);
+// Validación básica de entradas
+const datosValidos = (username, password) =>
+    typeof username === 'string' && typeof password === 'string' &&
+    username.length >= 3 && username.length <= 50 && password.length >= 8 && password.length <= 100;
 
-        // Postgres devuelve los datos en un arreglo llamado "rows"
+// Endpoint de Registro (Guarda la contraseña ENCRIPTADA)
+// Mínimo privilegio: solo funciona si REGISTRO_ABIERTO=true en el .env
+app.post('/api/auth/register', async (req, res) => {
+    if (REGISTRO_ABIERTO !== 'true') {
+        return res.status(403).json({ mensaje: 'El registro está deshabilitado. Solicita tu alta al administrador.' });
+    }
+    const { username, password } = req.body || {};
+    if (!datosValidos(username, password)) {
+        return res.status(400).json({ mensaje: 'Usuario (3+ caracteres) y contraseña (8+ caracteres) requeridos.' });
+    }
+    try {
+        const resultCheck = await pool.query('SELECT id FROM Usuarios WHERE username = $1', [username]);
         if (resultCheck.rows.length > 0) {
             return res.status(400).json({ mensaje: 'El usuario ya existe en la base de datos.' });
         }
-
-        // --- INICIO DE ENCRIPTACIÓN ---
-        const salt = await bcrypt.genSalt(10); 
-        const hashedPassword = await bcrypt.hash(password, salt); 
-        // --- FIN DE ENCRIPTACIÓN ---
-
+        const hashedPassword = await bcrypt.hash(password, 10);
         await pool.query('INSERT INTO Usuarios (username, password) VALUES ($1, $2)', [username, hashedPassword]);
-
         res.json({ mensaje: 'Usuario registrado exitosamente. Ya puedes iniciar sesión.' });
     } catch (err) {
-        res.status(500).json({ mensaje: 'Error en el servidor', error: err.message });
+        console.error(err);
+        res.status(500).json({ mensaje: 'Error en el servidor' });
     }
 });
 
 // Endpoint de Login (Valida comparando hashes)
 app.post('/api/auth/login', async (req, res) => {
-    const { username, password } = req.body;
+    const { username, password } = req.body || {};
+    if (typeof username !== 'string' || typeof password !== 'string') {
+        return res.status(400).json({ mensaje: 'Datos inválidos' });
+    }
     try {
-        const result = await pool.query('SELECT * FROM Usuarios WHERE username = $1', [username]);
-        
+        const result = await pool.query('SELECT username, password, rol FROM Usuarios WHERE username = $1', [username]);
         if (result.rows.length > 0) {
             const usuarioDb = result.rows[0];
-            
-            // --- VERIFICACIÓN CRIPTOGRÁFICA ---
             const contraseñaValida = await bcrypt.compare(password, usuarioDb.password);
-            
             if (contraseñaValida) {
-                const token = jwt.sign({ id: username, rol: 'doctor' }, SECRET_KEY, { expiresIn: '1h' });
+                const token = jwt.sign({ id: usuarioDb.username, rol: usuarioDb.rol }, JWT_SECRET, { algorithm: 'HS256', expiresIn: '1h' });
                 return res.json({ token, mensaje: 'Autenticación exitosa' });
             }
         }
         res.status(401).json({ mensaje: 'Credenciales incorrectas' });
     } catch (err) {
-        res.status(500).json({ mensaje: 'Error en el servidor', error: err.message });
+        console.error(err);
+        res.status(500).json({ mensaje: 'Error en el servidor' });
     }
 });
 
 // Endpoint Protegido
 app.get('/api/dashboard', verificarToken, async (req, res) => {
     try {
-        const result = await pool.query('SELECT * FROM Pacientes');
+        const result = await pool.query('SELECT id, nombre, sintomas FROM Pacientes ORDER BY id');
         res.json({ mensaje: 'Conexión a BD segura establecida.', pacientes: result.rows });
     } catch (err) {
-        res.status(500).json({ mensaje: 'Error al consultar BD', error: err.message });
+        console.error(err);
+        res.status(500).json({ mensaje: 'Error al consultar BD' });
     }
 });
 
-app.listen(3000, () => {
-    console.log('Backend Node.js corriendo en el puerto 3000');
+app.listen(Number(PORT), HOST, () => {
+    console.log(`Backend Node.js corriendo en http://${HOST}:${PORT}`);
 });
